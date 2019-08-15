@@ -1,5 +1,6 @@
 # CyberThreat2019.Binary2
 *Before getting confused, I used two different disassemblers here, thats why sometimes the memory address will jump way higher. Know that the image base for ghidra is 0x100000 and GDB(64bit elf) is 0x555555555000. I will often address the lines by their lower word*
+
 **1. First impressions**
 ```
         00102030 89 7d ec        MOV        dword ptr [RBP + -0x14],RDI
