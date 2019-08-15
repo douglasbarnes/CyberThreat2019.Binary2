@@ -1,5 +1,6 @@
-#CyberThreat2019.Binary2
-*1. First impressions* ```
+# CyberThreat2019.Binary2
+**1. First impressions**
+```
         00102030 89 7d ec        MOV        dword ptr [RBP + -0x14],RDI
         00102033 48 89 75 e0     MOV        qword ptr [RBP + -0x20],RSI
         00102037 c7 45 fc        MOV        dword ptr [RBP + -0x4],0x0
@@ -27,7 +28,7 @@ Notice the path being stored in memory
 MOV        qword ptr [RBP + -0x20],RSI
 ```
 Could be important later
-And also a suspicious call to 0x00101f85. Why are we calling immediately afterwards instead of calling it in the function? Likely to do with the path and other variable that was placed on the stack just before.
+And also a suspicious call to 0x00101f85. Why are we calling fork immediately afterwards instead of calling it in the function? Likely to do with the path and other variable that was placed on the stack just before.
 
 After stepping into the first call, an extremely suspicious assignment of registers.
 ```
@@ -38,10 +39,11 @@ After stepping into the first call, an extremely suspicious assignment of regist
    0x555555555fa2    mov    esi, 0
    0x555555555fa7    mov    edi, 0
    0x555555555fac    mov    eax, 0
-   0x555555555fb1    call   cosh@plt <0x5555555550b0>
+   0x555555555fb1    call   cosh@plt
 ```
-This is suspicious because not only does cosh take one argument, which is a XMM register, but is a glibc function. gLibc functions almost always follow the System V AMD64 ABI calling convention, simply, use the stack when possible. Assigning every register is more common in older libraries(Not every case ofcourse, but it solicits a closer look. If you've done this alot, you'll immediately recognize this assignment of registers, I'd rather give justification than a hunch). 
-*2. Checking PLT and GOT*
+This is suspicious because not only is it nothing like the input glibc cosh() takes, but anyone who has dealt with binaries before will immediately recognize this as *something bad*. Lets check out the function.
+
+**2. Checking PLT and GOT**
 ```
 pwndbg>! readelf binary2 -a
 Relocation section '.rela.plt' at offset 0x710 contains 13 entries:
@@ -68,7 +70,7 @@ End of assembler dump.
 pwndbg> x/2w 0x555555559058
 0x555555559058 <cosh@got.plt>:	0xf7b618d0	0x00007fff
 ```
-(The typical image base when debugging in gdb is 0x555555555000, this time there was a little offset for some reason. Know that the address "should" have been 0x555555555058)
+(The typical image base when debugging a 64bit elf in gdb is 0x555555555000, this time there was a little offset for some reason. Know that the address "should" have been 0x555555555058)
 
 So now we have found the address of "cosh".
 Lets remove the mask
@@ -120,7 +122,7 @@ Dump of assembler code for function ptrace:
    0x00007ffff7b6198d <+189>:	call   0x7ffff7b7a7b0 <__stack_chk_fail>
 End of assembler dump.
 ```
-Above the syscall, 0x65 is moved into EAX. This is the number associated with ptrace(rather 101d). We know ptrace can only be run once on a process and that debuggers will almost always call it, so this is how the program can detect our debugger.
+Above the syscall at +93, 0x65 is moved into EAX. This is the number associated with ptrace(rather 101d), [see me for more](https://blog.rchapman.org/posts/Linux_System_Call_Table_for_x86_64/). We know ptrace can only be run once on a process and that debuggers will almost always call it, so this is how the program can detect our debugger.
 ```
 $ man ptrace
 RETURN VALUE
@@ -128,21 +130,21 @@ RETURN VALUE
 
        On error, all requests return -1, and errno is set appropriately.  Since the value returned by a successful PTRACE_PEEK* request may be -1, the caller must clear errno before the call, and then check it afterward to determine whether or  not  an  error  occurred.
 ```
-As the man page shows, ptrace returns -1 on error, from there its pretty obvious the program will exit or mislead us. Whatever happens from now on isn't reliable. There isn't a great way to stop this other than using another debugger or patching the binary, from now I will just change EAX(the exit code of ptrace) each time to 0. Jumping over functions is risky, memory could be changed, other things could happen, this isn't strictly an "anti debugger function".
+As the man page shows, ptrace returns -1 on error, from there its pretty obvious the program will exit or mislead us. Whatever happens from now on isn't reliable. This is super important to keep in mind when reversing, once you're found out you need to restart, or even in some scenarios such as malware reversal, reset your VM. There isn't a great way to stop ptrace here other than using another debugger or patching the binary(ideally we would buffer overflow and mess with the GOT, but with this binary there is no opportunity), from now I will just change RAX(where the exit code is stored) each time to 0. Jumping over functions is risky, memory could be changed, other things could happen, this isn't strictly an "anti debugger function".
 
 P.S 
 1. We could have found all this out by stepping into the call, GDB does most of the heavy lifting for us, but its nice to know how it works. 
-2. Another way of doing the last part would be to use objdump -d to view the PLT.
+2. Another way of finding the address would be to use objdump -d to view the PLT like that.
 3. This binary uses another noobproofing method after this, if you read everything I wrote you'll know whats going on)
 
-*3. More wrapped functions*
-After seeing how easily a function can be wrapped as something else-- just by changing the address it points to in the GOT, we have learned are lesson and are never ever going to blindly next over a call function again, stepping in then using "fin" to exit out is always a safer option.
+**3. Time**
+After seeing how easily a function can be wrapped as another-- just by changing the address it points to in the GOT, we have learned are lesson and are never ever going to blindly next over a call function again, stepping in then using "fin" to exit out is always a safer option.
 Because of that, we immediately know whats going on when we see 
 ```
  0x555555556004    call   exit@plt <0x555555555030>
         status: 0x555555557100 ◂— 'What is the answer to the Ultimate Question of Life, The Universe and Everything?\n'
 ```
-A *char[] being passed to exit. After we step in, we see that exit is actually a wrapper for printf.
+A *char[] being passed to exit, something is up. After we step in, we see that exit is actually a wrapper for printf.
 ```
 0x7ffff7ac8560 <printf>        sub    rsp, 0xd8
 0x7ffff7ac8567 <printf+7>      mov    qword ptr [rsp + 0x28], rsi
@@ -162,14 +164,13 @@ Same goes with fork() which is actually puts(). From now on I will replace all t
 0x555555555d1a    mov    edi, 1
 0x555555555d1f    call   clock_gettime  <0x555555555060>
 ```
-Now clock_gettime() is stored in RSI, and eventually we get:
+Now clock_gettime() is stored in RSI, and eventually, if we keep stepping, we get:
 ```
 pwndbg>
 What are you running on? A C64?!
 ```
-This is pretty easy to get around, it looks like its trying to stop is stepping through. I just set a breakpoint after the second call to clock_gettime and use continue in gdb. If you wanted you could set RSI after the first call to some time in the far future.
-*4. Path comparison*
-The next test is testing two paths together, our current path, and one that was generated in the loop in the last step(hopefully you knew how to set a breakpoint...).
+This is pretty easy to get around, it looks like its trying to stop is stepping through. Setting a breakpoint after the second call to clock_gettime() then using ```continue``` in gdb will fix this. If you wanted you could set RSI after the first call to some time in the far future, but then you're risking sanity checks.
+**4. Path comparison**
 ```
 0x555555555f35    lea    rdx, [rbp - 0x60]
 0x555555555f39    mov    rax, qword ptr [rbp - 0x68]
@@ -177,7 +178,9 @@ The next test is testing two paths together, our current path, and one that was 
 0x555555555f40    mov    rdi, rax
 0x555555555f43    call   strcmp@plt <0x5555555550d0>
 ```
-If you want to, you could rename your executable and move it to the root directory--it would actually be a good idea in general incase the path is used as data later. I will just ```set $rax=0``` in gdb after the strcmp(this is actually strcmp, no tricks here)*5. Time*
+This test is comparing two paths together, our current path, and one that was generated in the loop after the last step(hopefully you knew how to set a breakpoint...).
+If you want to, you could rename your executable and move it to the root directory--it would actually be a good idea in general incase the path is used as data later. I will just ```set $rax=0``` in gdb after the strcmp(this is actually strcmp, no tricks here)
+**5. Time travel**
 Our next call is to time, which we then see in stdout
 ```
 Timestamp: 1565888805
@@ -190,8 +193,8 @@ Looking at the disassembly..
          00 00
 00101cb3 e8 38 f4        CALL       time
          ff ff
-00101cb8 89 45 f8        MOV        dword ptr [RBP + -0x8],EAX
-00101cbb 8b 45 f8        MOV        EAX,dword ptr [RBP + -0x8]
+00101cb8 89 45 f8        MOV        dword ptr [RBP + -0x8],EAX 
+00101cbb 8b 45 f8        MOV        EAX,dword ptr [RBP + -0x8] (Silly compiler!)
 00101cbe 89 c6           MOV        ESI,EAX
 00101cc0 48 8d 3d        LEA        RDI,[s_Timestamp:_%d_00103078]                   = "Timestamp: %d\n"
          b1 13 00 00
@@ -199,9 +202,9 @@ Looking at the disassembly..
          00 00
 00101ccc e8 5f f3        CALL       printf                                             = "Timestamp: %d\n"
          ff ff                                                                       void exit(int __status)
-00101cd1 8b 45 fc        MOV        EAX,dword ptr [RBP + -0x4]
+00101cd1 8b 45 fc        MOV        EAX,dword ptr [RBP + -0x4] (Break here and set it equal to [$rbp-0x4])
 00101cd4 3b 45 f8        CMP        EAX,dword ptr [RBP + -0x8]
-00101cd7 74 0e           JZ         LAB_00101ce7
+00101cd7 74 0e           JZ         LAB_00101ce7 (Takes us to "Right on time")
 00101cd9 48 8d 3d        LEA        RDI,[s_Too_slow!_00103087]                       = "Too slow!"
          a7 13 00 00
 00101ce0 e8 8b f3        CALL       puts                                             __pid_t fork(void)
@@ -217,7 +220,7 @@ Looking at the disassembly..
          ff ff
 
 ```
-We can see that we are comparing our current time [RBP-0x8] to 0x5d4412d5, which in UNIX time is the 2nd of August. A little annoying, as its now a pain to make a debuggerless solution. Instead, ```set {long*}($rbp-8)=0x1111111111111111``` after eax is moved there. Remember that $rbp-8 and $rbp-4 are next to each other, so we are just setting them to the same thing, if something goes wrong later it will be noticable because its all 1s. As you can see, we want to take the jump at cd7 that takes us to "Right on time". 
+We can see that we are comparing our current time [RBP-0x8] to [RBP-0x4](Hard coded to 0x5d4412d5), which in UNIX time is the 2nd of August. A little annoying, as its now a pain to make a debuggerless solution. Instead, ```set {long*}($rbp-8)=0x1111111111111111``` after eax is moved there at cd1. Remember that $rbp-8 and $rbp-4 are next to each other, so we are just setting them to the same thing. I tried settings [$rbp-8] to [$rbp-4], but GDB insisted on zero extending [$rbp-8] over [$rbp-4], using set {int*}($rbp-8)={int}($rbp-4) should work in theory. As you can see, we want to take the jump at cd7 that takes us to "Right on time". 
 ```
 FUN_00101c5a:
 00101c62 89 7d fc        MOV        dword ptr [RBP + -0x4],EDI
@@ -233,20 +236,20 @@ FUN_00101c5a:
          ff ff
 00101c80 eb 16           JMP        LAB_00101c98
 ```
-Now that we are in the next function, we can see EDI being moved to [RBP-0x4]. If we look back at the previous function above, we can see that the result of the first time() function(the output we overwrote to 0x5d4412d5) makes its way to EDI. Now it should be pretty clear what the function is doing, its making sure that the time has changed since last time it checked. This is catching people out who maybe tried using their own library to handle time.
+Now that we are in the next function, we can see EDI being moved to [RBP-0x4]. If we look back at the previous function above, we can see that the result of the first time() function(the output of which we overwrote) makes its way to EDI. Now it should be pretty clear what the function is doing, its making sure that the time has changed since last time it checked. This is catching people out who maybe tried using their own library to handle time(This would still be reasonably easy to handle).
 Now we get
 ```
 377, 610, 987, 1597, 2584, 4181
 ```
 Most likely important later.(spoiler it wasnt)
 And another loop function. You can safely break at image base + 0xba5
-(You will notice the dev noobs up here and writes the flag 1000 times to the stack, we'll carry on anyway)
-The next call is to socket. 
+(You will notice the dev noobs himself here and writes the flag 1000 times to the stack, we'll carry on anyway)
+The next call is to socket(). 
 Looking at the man page for socket,
 ```
 int socket(int domain, int type, int protocol);
 ```
-Here I made a mistake and completely ignored the inputs to this. Numerical values for enums in C are usually really hard to find, and they can be platform specific. The connection in this case is actually UDP, so bear that in mind. In the future, I will stick to checking both TCP and UDP.
+Here I made a mistake and completely ignored the inputs to this. Numerical values for enums in C are usually really hard to find, and they can be platform specific. The connection in this case is actually UDP, so bear that in mind. In the future, I will stick to checking both TCP and UDP when looking for outputs.
 
 Also notice 
 ```
@@ -265,13 +268,16 @@ Also we have
 ```
 If you aren't familiar with memset(), RDI is the pointer to the first address of memory to be set, RDX is the amount of bytes that will be written, and RSI is the character to repeat. So in this case, $rbp-0x110 will be set to 16d 0x00's. This isn't massively important here but its good to know.
 
-ntohs() call afterwards tells us that we're going to be listening on port 0x1a6d imminently. 
-inet_pton() -- dont care about.
+(Theres alot of moving arguments about here--so either disassemble for yourself or take my word for it)
+The input to the ntohs() call afterwards tells us that we're going to be listening on port 0x1a6d imminently. Output of it isn't important to us, basically just changes the endianness of a 2 byte value(I guess make sure you look at the port before and not after the call) 
+The input to inet_pton(), "127.0.0.1", tells us we're sending the data over our loopback.
 
-Now we have the sendto() call. The inputs here aren't massively important, we have everything we need to know.
+Now we have the sendto() call. The inputs here aren't massively important, we already have everything we need to know.
 
-Now I open a new terminal and start a netcat listening on 6765/UDP.
+Now its pretty clear that we just need to listen on port 6765 and we'll get our flag.
 ```
 root@kali:~# nc -l -u -p 6765
 CT19{REdLine} || CT19{REdLine} CT19{REdLine} || CT19{REdLine}  CT19{REdLine} || CT19{REdLine} CT19{REdLine} || CT19{REdLine} CT19{REdLine} || CT19{REdLine} CT19{REdLine} || CT19{REdLine}
 ```
+Alot more to it than binary1.
+
